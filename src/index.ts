@@ -1,4 +1,4 @@
-/* CSCI 5619 Lecture 8, Fall 2020
+/* CSCI 5619 Lecture 12, Fall 2020
  * Author: Evan Suma Rosenberg
  * License: Creative Commons Attribution-NonCommercial-ShareAlike 4.0 International
  */ 
@@ -7,27 +7,22 @@ import { Engine } from "@babylonjs/core/Engines/engine";
 import { Scene } from "@babylonjs/core/scene";
 import { Vector3, Color3, Color4 } from "@babylonjs/core/Maths/math";
 import { UniversalCamera } from "@babylonjs/core/Cameras/universalCamera";
-import { HemisphericLight } from "@babylonjs/core/Lights/hemisphericLight";
-import { DirectionalLight } from "@babylonjs/core/Lights/directionalLight";
-import { AssetsManager } from "@babylonjs/core/Misc/assetsManager"
 import { WebXRControllerComponent } from "@babylonjs/core/XR/motionController/webXRControllercomponent";
 import { WebXRInputSource } from "@babylonjs/core/XR/webXRInputSource";
 import { WebXRCamera } from "@babylonjs/core/XR/webXRCamera";
+import { PointLight } from "@babylonjs/core/Lights/pointLight";
 import { Logger } from "@babylonjs/core/Misc/logger";
 import { AbstractMesh } from "@babylonjs/core/Meshes/abstractMesh";
-
-// Physics
-import * as Cannon from "cannon"
-import { CannonJSPlugin } from "@babylonjs/core/Physics/Plugins/cannonJSPlugin";
-import { PhysicsImpostor } from "@babylonjs/core/Physics/physicsImpostor";
-import "@babylonjs/core/Physics/physicsEngineComponent";
+import {MeshBuilder} from  "@babylonjs/core/Meshes/meshBuilder";
+import { StandardMaterial } from "@babylonjs/core/Materials/standardMaterial";
+import { PointerEventTypes, PointerInfo } from "@babylonjs/core/Events/pointerEvents";
 
 // Side effects
-import "@babylonjs/loaders/glTF/2.0/glTFLoader";
 import "@babylonjs/core/Helpers/sceneHelpers";
 
 // Import debug layer
 import "@babylonjs/inspector";
+import { Material } from "@babylonjs/core/Materials/material";
 
 // Note: The structure has changed since previous assignments because we need to handle the 
 // async methods used for setting up XR. In particular, "createDefaultXRExperienceAsync" 
@@ -45,8 +40,10 @@ class Game
     private leftController: WebXRInputSource | null;
     private rightController: WebXRInputSource | null;
     
-    private rightGrabbedObject: AbstractMesh | null;
-    private grabbableObjects: Array<AbstractMesh>;
+    private selectedObject: AbstractMesh | null;
+    private selectableObjects: Array<AbstractMesh>;
+    private defaultMaterial : StandardMaterial | null;
+    private selectedMaterial : StandardMaterial | null;
 
     constructor()
     {
@@ -63,8 +60,11 @@ class Game
         this.leftController = null;
         this.rightController = null;
         
-        this.rightGrabbedObject = null;
-        this.grabbableObjects = [];
+        this.selectedObject = null;
+        this.selectableObjects = [];
+
+        this.defaultMaterial = null;
+        this.selectedMaterial = null;
     }
 
     start() : void 
@@ -90,29 +90,34 @@ class Game
         // This creates and positions a first-person camera (non-mesh)
         var camera = new UniversalCamera("camera1", new Vector3(0, 1.6, 0), this.scene);
         camera.fov = 90 * Math.PI / 180;
+        camera.minZ = .1;
+        camera.maxZ = 100;
 
         // This attaches the camera to the canvas
         camera.attachControl(this.canvas, true);
 
-        // Some ambient light to illuminate the scene
-        var ambientlight = new HemisphericLight("ambient", Vector3.Up(), this.scene);
-        ambientlight.intensity = 1.0;
-        ambientlight.diffuse = new Color3(.25, .25, .25);
-
-        // Add a directional light to imitate sunlight
-        var directionalLight = new DirectionalLight("sunlight", Vector3.Down(), this.scene);
-        directionalLight.intensity = 1.0;
+       // Create a point light
+       var pointLight = new PointLight("pointLight", new Vector3(0, 2.5, 0), this.scene);
+       pointLight.intensity = 1.0;
+       pointLight.diffuse = new Color3(.25, .25, .25);
 
         // Creates a default skybox
         const environment = this.scene.createDefaultEnvironment({
             createGround: true,
-            groundSize: 100,
-            skyboxSize: 750,
-            skyboxColor: new Color3(.059, .663, .80)
+            groundSize: 50,
+            skyboxSize: 50,
+            skyboxColor: new Color3(0, 0, 0)
         });
 
         // Creates the XR experience helper
         const xrHelper = await this.scene.createDefaultXRExperienceAsync({});
+        xrHelper.teleportation.dispose();
+        //xrHelper.pointerSelection.dispose();
+
+        // Register event handler for selection events (pulling the trigger, clicking the mouse button)
+        this.scene.onPointerObservable.add((pointerInfo) => {
+            this.processPointer(pointerInfo);
+        });
 
         // Assigns the web XR camera to a member variable
         this.xrCamera = xrHelper.baseExperience.camera;
@@ -120,17 +125,6 @@ class Game
         // There is a bug in Babylon 4.1 that fails to reenable pointer selection after a teleport
         // This is a hacky workaround that disables a different unused feature instead
         xrHelper.teleportation.setSelectionFeature(xrHelper.baseExperience.featuresManager.getEnabledFeature("xr-background-remover"));
-       
-        // Enable physics engine
-        this.scene.enablePhysics(new Vector3(0,-9.81, 0), new CannonJSPlugin(undefined, undefined, Cannon));
-        
-        // Create an invisible ground for physics collisions and teleportation
-        xrHelper.teleportation.addFloorMesh(environment!.ground!);
-        environment!.ground!.isVisible = false;
-        environment!.ground!.position = new Vector3(0, -.05, 0);
-        environment!.ground!.physicsImpostor = new PhysicsImpostor(environment!.ground!, PhysicsImpostor.BoxImpostor, 
-                                                {mass: 0, friction: 0.5, restitution: 0.7, ignoreParent: true}, this.scene);
-        
 
         xrHelper.input.onControllerAddedObservable.add((inputSource) => {
 
@@ -144,47 +138,59 @@ class Game
             }  
         });
 
-        // The assets manager can be used to load multiple assets
-        var assetsManager = new AssetsManager(this.scene);
+        // Create a unselected blue emissive material
+        this.defaultMaterial = new StandardMaterial("blueMaterial", this.scene);
+        this.defaultMaterial.diffuseColor = new Color3(.284, .73, .831);
+        this.defaultMaterial.specularColor = Color3.Black();
+        this.defaultMaterial.emissiveColor = new Color3(.284, .73, .831);
 
-        // Create a task for each asset you want to load
-        var worldTask = assetsManager.addMeshTask("world task", "", "assets/models/", "world.glb");
-        worldTask.onSuccess = (task) => {
-            worldTask.loadedMeshes[0].name = "world";
-            worldTask.loadedMeshes[0].position = new Vector3(0, 0.5, 0);
-            worldTask.loadedMeshes[0].rotation = Vector3.Zero();
-            worldTask.loadedMeshes[0].scaling = Vector3.One();
+        // Create a unselected red emissive material
+        this.selectedMaterial = new StandardMaterial("redMaterial", this.scene);
+        this.selectedMaterial.diffuseColor = new Color3(1, 0, 0);
+        this.selectedMaterial.specularColor = Color3.Black();
+        this.selectedMaterial.emissiveColor = new Color3(1, 0, 0);
+
+        for(var i=0; i < 100; i++)
+        {
+            let cube = MeshBuilder.CreateBox("exampleCube", {size: Math.random() * .4}, this.scene);
+            cube.position = new Vector3(Math.random() * 15 - 7.5, Math.random() * 5 + .2, Math.random() * 15 - 7.5);
+            cube.material = this.defaultMaterial;
+
+            this.selectableObjects.push(cube);
         }
         
-        // This loads all the assets and displays a loading screen
-        assetsManager.load();
+        this.scene.debugLayer.show(); 
+    }
 
-        // This will execute when all assets are loaded
-        assetsManager.onFinish = (tasks) => {
-
-            // Search through the loaded meshes
-            worldTask.loadedMeshes.forEach((mesh) => {
-
-                // Add a static physics impostor around the table
-                if(mesh.name == "rpgpp_lt_table_01")
+    // Event handler for processing pointer selection events
+    private processPointer(pointerInfo: PointerInfo)
+    {
+        switch (pointerInfo.type) {
+            case PointerEventTypes.POINTERDOWN:
+                if (pointerInfo.pickInfo?.hit) 
                 {
-                    mesh.setParent(null);
-                    mesh.physicsImpostor = new PhysicsImpostor(mesh, PhysicsImpostor.BoxImpostor,
-                        {mass: 0}, this.scene);
-                }
-                // Add only the mesh in the props group as grabbables
-                else if(mesh.parent?.name == "Props") {
-                    this.grabbableObjects.push(mesh);
-                    mesh.setParent(null);
-                    mesh.physicsImpostor = new PhysicsImpostor(mesh, PhysicsImpostor.BoxImpostor, {mass: 1}, this.scene);
-                    mesh.physicsImpostor.sleep();
-                }  
-            });
+                    // if we selected a selectable object
+                    if(this.selectableObjects.includes(pointerInfo.pickInfo.pickedMesh!))
+                    {
+                        // if an object was already selected, deselect it
+                        if(this.selectedObject)
+                        {
+                            this.selectedObject.material = this.defaultMaterial;
+                        }
 
-            // Show the debug layer
-            this.scene.debugLayer.show();
-        };  
-    
+                        // select the new object
+                        this.selectedObject = pointerInfo.pickInfo.pickedMesh;
+                        this.selectedObject!.material = this.selectedMaterial;
+                    }
+                    // otherwise, deselect any currently selected object
+                    else if(this.selectedObject)
+                    {
+                        this.selectedObject.material = this.defaultMaterial;
+                        this.selectedObject = null;
+                    }
+                }
+                break;
+        }
     }
 
     // The main update loop will be executed once per frame before the scene is rendered
@@ -197,197 +203,41 @@ class Game
     // Process event handlers for controller input
     private processControllerInput()
     {
-        this.onLeftTrigger(this.leftController?.motionController?.getComponent("xr-standard-trigger"));
-        this.onLeftSqueeze(this.leftController?.motionController?.getComponent("xr-standard-squeeze"));
-        this.onLeftThumbstick(this.leftController?.motionController?.getComponent("xr-standard-thumbstick"));
-        this.onLeftX(this.leftController?.motionController?.getComponent("x-button"));
-        this.onLeftY(this.leftController?.motionController?.getComponent("y-button"));
-
-        this.onRightTrigger(this.rightController?.motionController?.getComponent("xr-standard-trigger"));
-        this.onRightSqueeze(this.rightController?.motionController?.getComponent("xr-standard-squeeze"));
-        this.onRightThumbstick(this.rightController?.motionController?.getComponent("xr-standard-thumbstick"));
-        this.onRightA(this.rightController?.motionController?.getComponent("a-button"));
-        this.onRightB(this.rightController?.motionController?.getComponent("b-button"));
-
-        this.rightController?.grip?.
+        this.onTrigger(this.leftController?.motionController?.getComponent("xr-standard-trigger"));
+        this.onTrigger(this.rightController?.motionController?.getComponent("xr-standard-trigger"));
+        this.onSqueeze(this.leftController?.motionController?.getComponent("xr-standard-squeeze"));
+        this.onSqueeze(this.rightController?.motionController?.getComponent("xr-standard-squeeze"));
     }
 
-    private onLeftTrigger(component?: WebXRControllerComponent)
+    private onTrigger(component?: WebXRControllerComponent)
     {  
         if(component?.changes.pressed)
         {
             if(component?.pressed)
             {
-                Logger.Log("left trigger pressed");
+                Logger.Log("trigger pressed");
             }
             else
             {
-                Logger.Log("left trigger released");
+                Logger.Log("trigger released");
             }
-        }     
+        }  
     }
 
-    private onLeftSqueeze(component?: WebXRControllerComponent)
+    private onSqueeze(component?: WebXRControllerComponent)
     {  
         if(component?.changes.pressed)
         {
             if(component?.pressed)
             {
-                Logger.Log("left squeeze pressed");
+                Logger.Log("squeeze pressed");
             }
             else
             {
-                Logger.Log("left squeeze released");
+                Logger.Log("squeeze released");
             }
         }  
     }
-
-    private onLeftX(component?: WebXRControllerComponent)
-    {  
-        if(component?.changes.pressed)
-        {
-            if(component?.pressed)
-            {
-                Logger.Log("left X pressed");
-            }
-            else
-            {
-                Logger.Log("left X released");
-            }
-        }  
-    }
-
-    private onLeftY(component?: WebXRControllerComponent)
-    {  
-        if(component?.changes.pressed)
-        {
-            if(component?.pressed)
-            {
-                Logger.Log("left Y pressed");
-            }
-            else
-            {
-                Logger.Log("left Y released");
-            }
-        }  
-    }
-
-    private onLeftThumbstick(component?: WebXRControllerComponent)
-    {   
-        if(component?.changes.pressed)
-        {
-            if(component?.pressed)
-            {
-                Logger.Log("left thumbstick pressed");
-            }
-            else
-            {
-                Logger.Log("left thumbstick released");
-            }
-        }  
-
-        if(component?.changes.axes)
-        {
-            Logger.Log("left thumbstick axes: (" + component.axes.x + "," + component.axes.y + ")");
-        }
-    }
-
-    private onRightTrigger(component?: WebXRControllerComponent)
-    {  
-        if(component?.changes.pressed)
-        {
-            if(component?.pressed)
-            {
-                Logger.Log("right trigger pressed");
-            }
-            else
-            {
-                Logger.Log("right trigger released");
-            }
-        }  
-    }
-
-    private onRightSqueeze(component?: WebXRControllerComponent)
-    {  
-        if(component?.changes.pressed)
-        {
-            if(component?.pressed)
-            {
-                Logger.Log("right squeeze pressed");
-
-                for(var i = 0; i < this.grabbableObjects.length && !this.rightGrabbedObject; i++)
-                {
-                    if(this.rightController!.grip!.intersectsMesh(this.grabbableObjects[i], true))
-                    {
-                        this.rightGrabbedObject = this.grabbableObjects[i];
-                        this.rightGrabbedObject.physicsImpostor?.sleep();
-                        this.rightGrabbedObject.setParent(this.rightController!.grip!);
-                    }
-                }
-            }
-            else
-            {
-                Logger.Log("right squeeze released");
-
-                if(this.rightGrabbedObject)
-                {
-                    this.rightGrabbedObject.setParent(null);
-                    this.rightGrabbedObject.physicsImpostor?.wakeUp();
-                    this.rightGrabbedObject = null;
-                }
-            }
-        }  
-    }
-
-    private onRightA(component?: WebXRControllerComponent)
-    {  
-        if(component?.changes.pressed)
-        {
-            if(component?.pressed)
-            {
-                Logger.Log("right A pressed");
-            }
-            else
-            {
-                Logger.Log("right A released");
-            }
-        }  
-    }
-
-    private onRightB(component?: WebXRControllerComponent)
-    {  
-        if(component?.changes.pressed)
-        {
-            if(component?.pressed)
-            {
-                Logger.Log("right B pressed");
-            }
-            else
-            {
-                Logger.Log("right B released");
-            }
-        }  
-    }
-
-    private onRightThumbstick(component?: WebXRControllerComponent)
-    {  
-        if(component?.changes.pressed)
-        {
-            if(component?.pressed)
-            {
-                Logger.Log("right thumbstick pressed");
-            }
-            else
-            {
-                Logger.Log("right thumbstick released");
-            }
-        }  
-
-        if(component?.changes.axes)
-        {
-            Logger.Log("right thumbstick axes: (" + component.axes.x + "," + component.axes.y + ")");
-        }
-    }  
     
 }
 /******* End of the Game class ******/   
