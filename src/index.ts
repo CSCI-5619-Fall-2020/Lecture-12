@@ -5,7 +5,7 @@
 
 import { Engine } from "@babylonjs/core/Engines/engine";
 import { Scene } from "@babylonjs/core/scene";
-import { Vector3, Color3, Color4 } from "@babylonjs/core/Maths/math";
+import { Vector3, Color3, Space } from "@babylonjs/core/Maths/math";
 import { UniversalCamera } from "@babylonjs/core/Cameras/universalCamera";
 import { WebXRControllerComponent } from "@babylonjs/core/XR/motionController/webXRControllercomponent";
 import { WebXRInputSource } from "@babylonjs/core/XR/webXRInputSource";
@@ -15,6 +15,9 @@ import { Logger } from "@babylonjs/core/Misc/logger";
 import { AbstractMesh } from "@babylonjs/core/Meshes/abstractMesh";
 import {MeshBuilder} from  "@babylonjs/core/Meshes/meshBuilder";
 import { StandardMaterial } from "@babylonjs/core/Materials/standardMaterial";
+import { LinesMesh } from "@babylonjs/core/Meshes/linesMesh";
+import { Ray } from "@babylonjs/core/Culling/ray";
+import { TransformNode } from "@babylonjs/core/Meshes/transformNode";
 import { PointerEventTypes, PointerInfo } from "@babylonjs/core/Events/pointerEvents";
 
 // Side effects
@@ -22,7 +25,6 @@ import "@babylonjs/core/Helpers/sceneHelpers";
 
 // Import debug layer
 import "@babylonjs/inspector";
-import { Material } from "@babylonjs/core/Materials/material";
 
 // Note: The structure has changed since previous assignments because we need to handle the 
 // async methods used for setting up XR. In particular, "createDefaultXRExperienceAsync" 
@@ -39,12 +41,15 @@ class Game
     private xrCamera: WebXRCamera | null; 
     private leftController: WebXRInputSource | null;
     private rightController: WebXRInputSource | null;
+
+    private cubeMaterial : StandardMaterial | null;
     
     private selectedObject: AbstractMesh | null;
-    private selectableObjects: Array<AbstractMesh>;
-    private defaultMaterial : StandardMaterial | null;
-    private selectedMaterial : StandardMaterial | null;
+    private selectionTransform: TransformNode | null;
 
+    private laserPointer: LinesMesh | null;
+    private bimanualVector: Vector3;
+    
     constructor()
     {
         // Get the canvas element 
@@ -59,12 +64,14 @@ class Game
         this.xrCamera = null;
         this.leftController = null;
         this.rightController = null;
+
+        this.cubeMaterial = null;
         
         this.selectedObject = null;
-        this.selectableObjects = [];
-
-        this.defaultMaterial = null;
-        this.selectedMaterial = null;
+        this.selectionTransform = null;
+        
+        this.laserPointer = null; 
+        this.bimanualVector = Vector3.Zero();
     }
 
     start() : void 
@@ -108,136 +115,205 @@ class Game
             skyboxSize: 50,
             skyboxColor: new Color3(0, 0, 0)
         });
+        environment!.ground!.isPickable = false;
+        environment!.skybox!.isPickable = false;
 
         // Creates the XR experience helper
         const xrHelper = await this.scene.createDefaultXRExperienceAsync({});
-        xrHelper.teleportation.dispose();
-        //xrHelper.pointerSelection.dispose();
-
-        // Register event handler for selection events (pulling the trigger, clicking the mouse button)
-        this.scene.onPointerObservable.add((pointerInfo) => {
-            this.processPointer(pointerInfo);
-        });
 
         // Assigns the web XR camera to a member variable
         this.xrCamera = xrHelper.baseExperience.camera;
 
-        // There is a bug in Babylon 4.1 that fails to reenable pointer selection after a teleport
-        // This is a hacky workaround that disables a different unused feature instead
-        xrHelper.teleportation.setSelectionFeature(xrHelper.baseExperience.featuresManager.getEnabledFeature("xr-background-remover"));
+        xrHelper.teleportation.dispose();
+        xrHelper.pointerSelection.dispose();
 
+        /*
+        // Register event handler for selection events (pulling the trigger, clicking the mouse button)
+        this.scene.onPointerObservable.add((pointerInfo) => {
+            this.processPointer(pointerInfo);
+        });
+        */
+
+        var laserPoints = [];
+        laserPoints.push(new Vector3(0, 0, 0));
+        laserPoints.push(new Vector3(0, 0, 10));
+
+        this.laserPointer = MeshBuilder.CreateLines("laserPointer", {points: laserPoints}, this.scene);
+        this.laserPointer.color = Color3.Blue();
+        this.laserPointer.alpha = .5;
+        this.laserPointer.visibility = 0;
+        this.laserPointer.isPickable = false;
+        
+        this.selectionTransform = new TransformNode("selectionTransform", this.scene);
+        this.selectionTransform.parent = this.laserPointer;
+        
         xrHelper.input.onControllerAddedObservable.add((inputSource) => {
 
-            if(inputSource.uniqueId.endsWith("left")) 
+            if(inputSource.uniqueId.endsWith("right")) 
             {
-                this.leftController = inputSource;
+                this.rightController = inputSource;
+                this.laserPointer!.parent = this.rightController.pointer;
+                this.laserPointer!.visibility = 1;
             }
             else 
             {
-                this.rightController = inputSource;
+                this.leftController = inputSource;
             }  
         });
 
-        // Create a unselected blue emissive material
-        this.defaultMaterial = new StandardMaterial("blueMaterial", this.scene);
-        this.defaultMaterial.diffuseColor = new Color3(.284, .73, .831);
-        this.defaultMaterial.specularColor = Color3.Black();
-        this.defaultMaterial.emissiveColor = new Color3(.284, .73, .831);
+        xrHelper.input.onControllerRemovedObservable.add((inputSource) => {
 
-        // Create a unselected red emissive material
-        this.selectedMaterial = new StandardMaterial("redMaterial", this.scene);
-        this.selectedMaterial.diffuseColor = new Color3(1, 0, 0);
-        this.selectedMaterial.specularColor = Color3.Black();
-        this.selectedMaterial.emissiveColor = new Color3(1, 0, 0);
+            if(inputSource.uniqueId.endsWith("right")) 
+            {
+                this.laserPointer!.parent = null;
+                this.laserPointer!.visibility = 0;
+            }
+        });
+
+        // Create a unselected blue emissive material
+        this.cubeMaterial = new StandardMaterial("blueMaterial", this.scene);
+        this.cubeMaterial.diffuseColor = new Color3(.284, .73, .831);
+        this.cubeMaterial.specularColor = Color3.Black();
+        this.cubeMaterial.emissiveColor = new Color3(.284, .73, .831);
+
+        var testCube = MeshBuilder.CreateBox("testCube", {size: .25}, this.scene);
+        testCube.position = new Vector3(.5, 1.5, 2);
+        testCube.material = this.cubeMaterial;
+        testCube.edgesWidth = .3;
 
         for(var i=0; i < 100; i++)
         {
-            let cube = MeshBuilder.CreateBox("exampleCube", {size: Math.random() * .4}, this.scene);
+            let cube = MeshBuilder.CreateBox("cube", {size: Math.random() * .4}, this.scene);
             cube.position = new Vector3(Math.random() * 15 - 7.5, Math.random() * 5 + .2, Math.random() * 15 - 7.5);
-            cube.material = this.defaultMaterial;
-
-            this.selectableObjects.push(cube);
+            cube.material = this.cubeMaterial;
+            cube.edgesWidth = .3;
         }
         
         this.scene.debugLayer.show(); 
     }
 
+    /*
     // Event handler for processing pointer selection events
     private processPointer(pointerInfo: PointerInfo)
     {
         switch (pointerInfo.type) {
-            case PointerEventTypes.POINTERDOWN:
-                if (pointerInfo.pickInfo?.hit) 
-                {
-                    // if we selected a selectable object
-                    if(this.selectableObjects.includes(pointerInfo.pickInfo.pickedMesh!))
-                    {
-                        // if an object was already selected, deselect it
-                        if(this.selectedObject)
-                        {
-                            this.selectedObject.material = this.defaultMaterial;
-                        }
 
-                        // select the new object
-                        this.selectedObject = pointerInfo.pickInfo.pickedMesh;
-                        this.selectedObject!.material = this.selectedMaterial;
-                    }
-                    // otherwise, deselect any currently selected object
-                    else if(this.selectedObject)
-                    {
-                        this.selectedObject.material = this.defaultMaterial;
-                        this.selectedObject = null;
-                    }
+            case PointerEventTypes.POINTERDOWN:   
+                // deselect the currently selected object 
+                if(this.selectedObject)
+                {
+                    this.selectedObject.disableEdgesRendering();
+                    this.selectedObject = null;
                 }
+
+                // if an object was hit
+                if(pointerInfo.pickInfo?.hit) 
+                {
+                    this.selectedObject = pointerInfo.pickInfo!.pickedMesh;
+                    this.selectedObject!.enableEdgesRendering();
+                }     
                 break;
         }
     }
+    */
 
     // The main update loop will be executed once per frame before the scene is rendered
     private update() : void
     {
         // Polling for controller input
         this.processControllerInput();  
+
+        // Update the bimanual vector
+        if(this.rightController && this.leftController)
+        {
+            this.bimanualVector = this.rightController.grip!.position.subtract(this.leftController.grip!.position);
+        } 
     }
 
     // Process event handlers for controller input
     private processControllerInput()
     {
-        this.onTrigger(this.leftController?.motionController?.getComponent("xr-standard-trigger"));
-        this.onTrigger(this.rightController?.motionController?.getComponent("xr-standard-trigger"));
-        this.onSqueeze(this.leftController?.motionController?.getComponent("xr-standard-squeeze"));
-        this.onSqueeze(this.rightController?.motionController?.getComponent("xr-standard-squeeze"));
+        this.onRightTrigger(this.rightController?.motionController?.getComponent("xr-standard-trigger"));
+        this.onRightSqueeze(this.rightController?.motionController?.getComponent("xr-standard-squeeze"));
+        this.onLeftSqueeze(this.leftController?.motionController?.getComponent("xr-standard-squeeze"));
+        this.onRightThumbstick(this.rightController?.motionController?.getComponent("xr-standard-thumbstick"));
     }
 
-    private onTrigger(component?: WebXRControllerComponent)
+    private onRightTrigger(component?: WebXRControllerComponent)
     {  
         if(component?.changes.pressed)
         {
             if(component?.pressed)
             {
-                Logger.Log("trigger pressed");
+                this.laserPointer!.color = Color3.Green();
+                
+                var ray = new Ray(this.rightController!.pointer.position, this.rightController!.pointer.forward, 10);
+                var pickInfo = this.scene.pickWithRay(ray);
+
+         
+                // deselect the currently selected object 
+                if(this.selectedObject)
+                {
+                    this.selectedObject.disableEdgesRendering();
+                    this.selectedObject.setParent(null);
+                    this.selectedObject = null;
+                }
+
+                // select the new object 
+                if(pickInfo?.hit)
+                {
+                    this.selectionTransform!.position = new Vector3(0, 0, pickInfo.distance);
+                    this.selectedObject = pickInfo.pickedMesh;
+                    this.selectedObject!.enableEdgesRendering();
+                    this.selectedObject!.setParent(this.selectionTransform!);
+                }
             }
             else
             {
-                Logger.Log("trigger released");
+                if(this.selectedObject)
+                {
+                    this.selectedObject.setParent(null);
+                }
+
+                this.laserPointer!.color = Color3.Blue();
             }
         }  
     }
 
-    private onSqueeze(component?: WebXRControllerComponent)
+    private onRightSqueeze(component?: WebXRControllerComponent)
     {  
-        if(component?.changes.pressed)
+        if(component?.pressed && this.leftController && this.selectedObject)
         {
-            if(component?.pressed)
-            {
-                Logger.Log("squeeze pressed");
-            }
-            else
-            {
-                Logger.Log("squeeze released");
-            }
-        }  
+            var currentBimanualVector = this.rightController!.grip!.position.subtract(this.leftController!.grip!.position);
+
+            var sourceVector = this.bimanualVector.normalizeToNew();
+            var targetVector = currentBimanualVector.normalizeToNew();
+            var angle = Math.acos(Vector3.Dot(sourceVector, targetVector));
+            var axis = Vector3.Cross(sourceVector, targetVector);
+
+            this.selectedObject.rotate(axis, angle, Space.WORLD);
+        }
     }
+
+    private onLeftSqueeze(component?: WebXRControllerComponent)
+    {  
+        if(component?.pressed && this.rightController && this.selectedObject)
+        {
+            var currentBimanualVector = this.rightController!.grip!.position.subtract(this.leftController!.grip!.position);
+6
+            var scaleFactor = currentBimanualVector.length() / this.bimanualVector.length();
+            this.selectedObject.scaling = this.selectedObject.scaling.multiplyByFloats(scaleFactor, scaleFactor, scaleFactor);
+        }
+    }
+
+    private onRightThumbstick(component?: WebXRControllerComponent)
+    {  
+        if(component?.changes.axes && this.selectedObject && this.selectedObject.parent)
+        {
+            var moveDistance = -component.axes.y * (this.engine.getDeltaTime() / 1000) * 3;
+            this.selectedObject.translate(this.laserPointer!.forward, moveDistance, Space.WORLD);
+        }
+    }   
     
 }
 /******* End of the Game class ******/   

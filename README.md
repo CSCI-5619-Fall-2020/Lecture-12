@@ -2,7 +2,11 @@
 
 ## Topics
 
-1. To be added
+1. Selection with ray casting
+2. Manipulating position through pointing
+3. Manipulating distance using a depth ray
+4. Manipulating rotation using bimanual control
+5. Manipulating scale using bimanual control
 
 ## Participation Exercise
 
