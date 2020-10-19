@@ -5,12 +5,10 @@
 1. Selection with ray casting
 2. Manipulating position through pointing
 3. Manipulating distance using a depth ray
-4. Manipulating rotation using bimanual control
-5. Manipulating scale using bimanual control
 
 ## Participation Exercise
 
-To be added.
+The participation exercise for this lecture is posted on Canvas.
 
 ## License
 
