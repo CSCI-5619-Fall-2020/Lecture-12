@@ -1,4 +1,6 @@
-# Lecture 12: Selection and Manipulation
+# Lecture 12: Ray Casting
+
+Detailed explanation of this code can be found in the lecture [video](https://mediaspace.umn.edu/media/1_08l1zept).
 
 ## Topics
 
